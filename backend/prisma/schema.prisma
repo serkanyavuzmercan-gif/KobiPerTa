@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String             @id @default(cuid())
+  email        String             @unique
+  passwordHash String
+  fullName     String
+  role         String             @default("EMPLOYEE")
+  active       Boolean            @default(true)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  attendances  AttendanceRecord[]
+  leaves       Leave[]
+}
+
+model CompanySettings {
+  id                    Int     @id @default(1)
+  companyName           String  @default("KobiPerTa")
+  workStart             String  @default("08:00")
+  workEnd               String  @default("17:00")
+  breakMinutes          Int     @default(60)
+  deductBreak           Boolean @default(true)
+  latitude              Float   @default(41.0082)
+  longitude             Float   @default(28.9784)
+  radiusMeters          Int     @default(150)
+  qrSecret              String  @default("kobiperta-qr-secret")
+  timezoneOffsetMinutes Int     @default(180)
+}
+
+model AttendanceRecord {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String
+  workDate  String
+  timestamp DateTime
+  latitude  Float?
+  longitude Float?
+  note      String?
+  editedBy  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, workDate])
+  @@index([workDate])
+}
+
+model Holiday {
+  id        String   @id @default(cuid())
+  date      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+}
+
+model Leave {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  date      String
+  type      String   @default("ANNUAL")
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@unique([userId, date])
+}
