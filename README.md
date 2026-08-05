@@ -3,19 +3,21 @@
 KOBİ personel giriş-çıkış takip sistemi.
 
 - **Android uygulama:** GPS + QR ile günlük giriş/çıkış
-- **Yönetici web paneli:** kullanıcı tanımları, mesai ayarları, QR, aylık saat raporu
+- **Yönetici web paneli:** kullanıcı tanımları, mesai ayarları, QR, aylık saat raporu, Excel aktarım
 - **Backend API:** ortak kurallar ve hesaplamalar
 
 ## İş kuralları
 
-1. Günlük **tek giriş** ve **tek çıkış** (mola için çıkış yapılmaz)
-2. Giriş olmadan çıkış yapılamaz
+1. Gün içinde **birden fazla giriş/çıkış** yapılabilir; **giriş olmadan çıkış** yapılamaz
+2. QR ile peş peşe işlemler arasında **en az 5 dakika** olmalıdır
 3. Mesai bitişinden sonra **giriş** yapılamaz; **çıkış** yapılabilir (fazla mesai)
-4. Giriş/çıkış için **GPS (işyeri yarıçapı) + QR** birlikte zorunlu
+4. Giriş/çıkış için GPS (mesai butonları) veya QR+GPS (QR okut)
 5. Tüm şirket personeli birbirinin giriş/çıkışını görebilir
 6. Yönetici: kullanıcı ekler, mesai aralığı/mola düşümü belirler, eksik çıkış ve saat düzeltir
 7. Aylık çalışma saati + fazla mesai hesaplanır; mola düşümü yönetici tercihine bağlıdır
 8. Resmi tatil ve izinler eklenebilir; Türkiye resmi tatilleri `date-holidays` ile yıla göre otomatik yüklenebilir
+9. **Çıkış unutulursa** ertesi gün sabah **giriş yapılabilir**. Unutulan oturumun çıkışı rapor/Excel'de **boş** kalır; yönetici manuel düzeltir
+10. Excel aktarımında her giriş–çıkış çifti ayrı satırda **Excel formülü** ile hesaplanır
 
 ## Klasörler
 

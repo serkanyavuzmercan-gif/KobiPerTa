@@ -1,6 +1,7 @@
 package com.kobiperta.app.data
 
 import android.content.Context
+import com.kobiperta.app.BuildConfig
 
 data class AuthUser(
     val id: String,
@@ -14,27 +15,39 @@ class SessionStore(context: Context) {
 
     var token: String?
         get() = prefs.getString("token", null)
-        set(value) = prefs.edit().putString("token", value).apply()
+        set(value) {
+            prefs.edit().putString("token", value).apply()
+        }
 
     var email: String?
         get() = prefs.getString("email", null)
-        set(value) = prefs.edit().putString("email", value).apply()
+        set(value) {
+            prefs.edit().putString("email", value).apply()
+        }
 
     var fullName: String?
         get() = prefs.getString("fullName", null)
-        set(value) = prefs.edit().putString("fullName", value).apply()
+        set(value) {
+            prefs.edit().putString("fullName", value).apply()
+        }
 
     var userId: String?
         get() = prefs.getString("userId", null)
-        set(value) = prefs.edit().putString("userId", value).apply()
+        set(value) {
+            prefs.edit().putString("userId", value).apply()
+        }
 
     var role: String?
         get() = prefs.getString("role", null)
-        set(value) = prefs.edit().putString("role", value).apply()
+        set(value) {
+            prefs.edit().putString("role", value).apply()
+        }
 
     var apiBaseUrl: String
-        get() = prefs.getString("apiBaseUrl", null) ?: com.kobiperta.app.BuildConfig.API_BASE_URL
-        set(value) = prefs.edit().putString("apiBaseUrl", value.trim().trimEnd('/')).apply()
+        get() = prefs.getString("apiBaseUrl", null) ?: BuildConfig.API_BASE_URL
+        set(value) {
+            prefs.edit().putString("apiBaseUrl", value.trim().trimEnd('/')).apply()
+        }
 
     fun saveLogin(token: String, user: AuthUser) {
         this.token = token

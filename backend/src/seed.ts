@@ -9,7 +9,7 @@ export async function seed() {
         id: 1,
         companyName: "KobiPerTa",
         workStart: "08:00",
-        workEnd: "17:00",
+        workEnd: "18:00",
         breakMinutes: 60,
         deductBreak: true,
         latitude: 41.0082,
@@ -20,11 +20,18 @@ export async function seed() {
         passwordResetEmail: "admin@kobiperta.local",
       },
     });
-  } else if (!(settings as { passwordResetEmail?: string }).passwordResetEmail) {
-    await prisma.companySettings.update({
-      where: { id: 1 },
-      data: { passwordResetEmail: "admin@kobiperta.local" },
-    });
+  } else {
+    const patch: { passwordResetEmail?: string; workEnd?: string } = {};
+    if (!(settings as { passwordResetEmail?: string }).passwordResetEmail) {
+      patch.passwordResetEmail = "admin@kobiperta.local";
+    }
+    // Align existing installs with 08:00–18:00 normal shift for payroll
+    if (settings.workEnd === "17:00") {
+      patch.workEnd = "18:00";
+    }
+    if (Object.keys(patch).length) {
+      await prisma.companySettings.update({ where: { id: 1 }, data: patch });
+    }
   }
 
   const adminEmail = "admin@kobiperta.local";

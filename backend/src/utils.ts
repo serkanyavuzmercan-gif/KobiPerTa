@@ -53,26 +53,60 @@ export function verifyQrToken(secret: string, token: string): boolean {
   return [-1, 0, 1].some((delta) => buildQrToken(secret, now + delta * QR_SLOT_MS) === token);
 }
 
+export function sortedRecords(records: AttendanceRecord[]) {
+  return [...records].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+}
+
+/** Pair consecutive check-in / check-out cycles for a day. */
+export function daySessions(records: AttendanceRecord[]) {
+  const sorted = sortedRecords(records);
+  const pairs: { checkIn: AttendanceRecord; checkOut: AttendanceRecord }[] = [];
+  let openCheckIn: AttendanceRecord | null = null;
+
+  for (const r of sorted) {
+    if (r.type === "CHECK_IN") {
+      if (!openCheckIn) openCheckIn = r;
+    } else if (r.type === "CHECK_OUT" && openCheckIn) {
+      pairs.push({ checkIn: openCheckIn, checkOut: r });
+      openCheckIn = null;
+    }
+  }
+
+  const firstCheckIn = sorted.find((r) => r.type === "CHECK_IN") ?? null;
+  const lastClosedOut = pairs.length ? pairs[pairs.length - 1].checkOut : null;
+
+  return {
+    pairs,
+    openCheckIn,
+    firstCheckIn,
+    /** Display: open session in, else first in */
+    checkIn: openCheckIn ?? firstCheckIn,
+    /** Display: null while open (incomplete); else last closed out */
+    checkOut: openCheckIn ? null : lastClosedOut,
+    isOpen: Boolean(openCheckIn),
+    lastRecord: sorted.length ? sorted[sorted.length - 1] : null,
+  };
+}
+
+/** @deprecated prefer daySessions */
 export function dayPairs(records: AttendanceRecord[]) {
-  const sorted = [...records].sort(
-    (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
-  );
-  const checkIn = sorted.find((r) => r.type === "CHECK_IN") ?? null;
-  const checkOut = sorted.find((r) => r.type === "CHECK_OUT") ?? null;
-  return { checkIn, checkOut };
+  const s = daySessions(records);
+  return { checkIn: s.checkIn, checkOut: s.checkOut };
 }
 
 export function computeDayMinutes(
   checkIn: Date | null,
   checkOut: Date | null,
-  settings: CompanySettings
+  settings: CompanySettings,
+  options?: { deductBreak?: boolean }
 ): { worked: number; overtime: number; incomplete: boolean } {
   if (!checkIn || !checkOut) {
     return { worked: 0, overtime: 0, incomplete: Boolean(checkIn && !checkOut) };
   }
 
   let worked = Math.max(0, differenceInMinutes(checkOut, checkIn));
-  if (settings.deductBreak) {
+  const doBreak = options?.deductBreak ?? true;
+  if (doBreak && settings.deductBreak) {
     worked = Math.max(0, worked - settings.breakMinutes);
   }
 
@@ -84,6 +118,47 @@ export function computeDayMinutes(
   const overtime = Math.max(0, outMin - workEndMin);
 
   return { worked, overtime, incomplete: false };
+}
+
+export function computeDayFromSessions(
+  records: AttendanceRecord[],
+  settings: CompanySettings
+): {
+  worked: number;
+  overtime: number;
+  incomplete: boolean;
+  checkInHm: string | null;
+  checkOutHm: string | null;
+  pairs: { checkIn: AttendanceRecord; checkOut: AttendanceRecord }[];
+  openCheckIn: AttendanceRecord | null;
+} {
+  const s = daySessions(records);
+  let worked = 0;
+  let overtime = 0;
+  for (const p of s.pairs) {
+    const calc = computeDayMinutes(p.checkIn.timestamp, p.checkOut.timestamp, settings, {
+      deductBreak: false,
+    });
+    worked += calc.worked;
+    overtime += calc.overtime;
+  }
+  if (settings.deductBreak && s.pairs.length > 0) {
+    worked = Math.max(0, worked - settings.breakMinutes);
+  }
+  return {
+    worked,
+    overtime,
+    incomplete: s.isOpen,
+    checkInHm: s.firstCheckIn
+      ? toLocalHm(s.firstCheckIn.timestamp, settings.timezoneOffsetMinutes)
+      : null,
+    checkOutHm:
+      s.isOpen || !s.checkOut
+        ? null
+        : toLocalHm(s.checkOut.timestamp, settings.timezoneOffsetMinutes),
+    pairs: s.pairs,
+    openCheckIn: s.openCheckIn,
+  };
 }
 
 export function monthKey(date = new Date()): string {
@@ -111,4 +186,22 @@ export function parseWorkDateTime(workDate: string, hm: string, offsetMinutes: n
 export function toLocalHm(date: Date, offsetMinutes: number): string {
   const local = new Date(date.getTime() + offsetMinutes * 60_000);
   return `${String(local.getUTCHours()).padStart(2, "0")}:${String(local.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+/** Local time as HH.mm:ss (e.g. 08.30:15) for Excel display. */
+export function toLocalHms(date: Date, offsetMinutes: number): string {
+  const local = new Date(date.getTime() + offsetMinutes * 60_000);
+  const hh = String(local.getUTCHours()).padStart(2, "0");
+  const mm = String(local.getUTCMinutes()).padStart(2, "0");
+  const ss = String(local.getUTCSeconds()).padStart(2, "0");
+  return `${hh}.${mm}:${ss}`;
+}
+
+/** Convert HH:mm (or HH:mm:ss) to HH.mm:ss display string. */
+export function hmToDisplayHms(hm: string): string {
+  const parts = hm.split(":");
+  const h = parts[0] ?? "00";
+  const m = parts[1] ?? "00";
+  const s = parts[2] ?? "00";
+  return `${h.padStart(2, "0")}.${m.padStart(2, "0")}:${s.padStart(2, "0")}`;
 }

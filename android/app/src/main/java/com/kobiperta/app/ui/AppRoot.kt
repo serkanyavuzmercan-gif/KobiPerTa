@@ -50,16 +50,22 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.kobiperta.app.data.ApiClient
 import com.kobiperta.app.data.AuthUser
 import com.kobiperta.app.data.SessionStore
 import com.kobiperta.app.data.TodayRow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val Blue = Color(0xFF0369A1)
 private val Dark = Color(0xFF0F172A)
@@ -166,8 +172,8 @@ fun LoginScreen(
             singleLine = true,
             modifier = M.fillMaxWidth(),
         )
-        error?.let {
-            Text(it, color = Color(0xFFB91C1C), modifier = M.padding(top = 12.dp))
+        error?.let { msg ->
+            Text(msg, color = Color(0xFFB91C1C), modifier = M.padding(top = 12.dp))
         }
         Button(
             enabled = !loading,
@@ -305,15 +311,32 @@ fun HomeScreen(
 
     LaunchedEffect(Unit) { refresh() }
 
-    fun punchWithToken(token: String) {
+    fun punchGps(type: String) {
         loading = true
         message = null
         scope.launch {
             try {
                 val loc = currentLocation(context)
-                api.punch(pendingType, loc.latitude, loc.longitude, token)
-                message = if (pendingType == "CHECK_IN") "Mesaiye başlandı" else "Mesai bitirildi"
-                scanning = false
+                api.punch(type, loc.latitude, loc.longitude, mode = "gps")
+                message = if (type == "CHECK_IN") "Mesaiye başlandı" else "Mesai bitirildi"
+                refresh()
+            } catch (e: Exception) {
+                message = e.message
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    fun punchWithQr(token: String) {
+        loading = true
+        message = null
+        scanning = false
+        scope.launch {
+            try {
+                val loc = currentLocation(context)
+                api.punch(pendingType, loc.latitude, loc.longitude, mode = "qr", qrToken = token)
+                message = if (pendingType == "CHECK_IN") "Mesaiye başlandı (QR)" else "Mesai bitirildi (QR)"
                 refresh()
             } catch (e: Exception) {
                 message = e.message
@@ -343,18 +366,15 @@ fun HomeScreen(
 
         BigAction(
             title = "Mesaiye başla",
-            subtitle = "Giriş kaydı (GPS + QR)",
+            subtitle = "Konum ile giriş",
             color = Color(0xFF059669),
             enabled = permissionReady && !loading,
-            onClick = {
-                pendingType = "CHECK_IN"
-                scanning = true
-            },
+            onClick = { punchGps("CHECK_IN") },
         )
         Spacer(M.height(12.dp))
         BigAction(
             title = "QR okut",
-            subtitle = "Kamera ile kodu okut",
+            subtitle = "Kamera ile otomatik kayıt",
             color = Blue,
             enabled = permissionReady && !loading,
             onClick = {
@@ -365,13 +385,10 @@ fun HomeScreen(
         Spacer(M.height(12.dp))
         BigAction(
             title = "Mesaiyi bitir",
-            subtitle = "Çıkış kaydı (GPS + QR)",
+            subtitle = "Konum ile çıkış",
             color = Color(0xFFB45309),
             enabled = permissionReady && !loading,
-            onClick = {
-                pendingType = "CHECK_OUT"
-                scanning = true
-            },
+            onClick = { punchGps("CHECK_OUT") },
         )
 
         if (loading) {
@@ -405,9 +422,9 @@ fun HomeScreen(
 
     if (scanning) {
         QrScannerDialog(
-            title = if (pendingType == "CHECK_IN") "Mesaiye başla - QR okutun" else "Mesaiyi bitir - QR okutun",
+            title = if (pendingType == "CHECK_IN") "QR okut — giriş" else "QR okut — çıkış",
             onCancel = { scanning = false },
-            onToken = { punchWithToken(it) },
+            onToken = { punchWithQr(it) },
         )
     }
 }
@@ -436,9 +453,9 @@ private fun BigAction(
 
 @Composable
 fun QrScannerDialog(title: String, onCancel: () -> Unit, onToken: (String) -> Unit) {
-    var manual by remember { mutableStateOf("") }
     val lifecycleOwner = LocalLifecycleOwner.current
-    var handled by remember { mutableStateOf(false) }
+    val handled = remember { AtomicBoolean(false) }
+    var statusText by remember { mutableStateOf("QR kodu kameraya gösterin…") }
 
     Box(M.fillMaxSize().background(Color(0xCC0F172A)).padding(16.dp)) {
         Column(
@@ -448,10 +465,16 @@ fun QrScannerDialog(title: String, onCancel: () -> Unit, onToken: (String) -> Un
                 .padding(16.dp),
         ) {
             Text(title, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, textAlign = TextAlign.Center)
-            Spacer(M.height(8.dp))
+            Text(
+                statusText,
+                color = Color(0xFF64748B),
+                modifier = M.padding(top = 6.dp, bottom = 8.dp),
+                textAlign = TextAlign.Center,
+            )
             AndroidView(
                 factory = { ctx ->
                     val previewView = PreviewView(ctx)
+                    val mainExecutor = ContextCompat.getMainExecutor(ctx)
                     val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
@@ -462,25 +485,25 @@ fun QrScannerDialog(title: String, onCancel: () -> Unit, onToken: (String) -> Un
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
                         val scanner = BarcodeScanning.getClient()
-                        analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                        analysis.setAnalyzer(mainExecutor) { imageProxy ->
                             val mediaImage = imageProxy.image
-                            if (mediaImage != null && !handled) {
-                                val image = InputImage.fromMediaImage(
-                                    mediaImage,
-                                    imageProxy.imageInfo.rotationDegrees,
-                                )
-                                scanner.process(image)
-                                    .addOnSuccessListener { barcodes ->
-                                        val raw = barcodes.firstOrNull()?.rawValue
-                                        if (!raw.isNullOrBlank() && !handled) {
-                                            handled = true
-                                            onToken(ApiClient.extractQrToken(raw))
-                                        }
-                                    }
-                                    .addOnCompleteListener { imageProxy.close() }
-                            } else {
+                            if (mediaImage == null || handled.get()) {
                                 imageProxy.close()
+                                return@setAnalyzer
                             }
+                            val image = InputImage.fromMediaImage(
+                                mediaImage,
+                                imageProxy.imageInfo.rotationDegrees,
+                            )
+                            scanner.process(image)
+                                .addOnSuccessListener(mainExecutor) { barcodes ->
+                                    val raw = barcodes.firstOrNull()?.rawValue
+                                    if (!raw.isNullOrBlank() && handled.compareAndSet(false, true)) {
+                                        statusText = "QR okundu, kaydediliyor…"
+                                        onToken(ApiClient.extractQrToken(raw))
+                                    }
+                                }
+                                .addOnCompleteListener { imageProxy.close() }
                         }
                         cameraProvider.unbindAll()
                         cameraProvider.bindToLifecycle(
@@ -489,37 +512,41 @@ fun QrScannerDialog(title: String, onCancel: () -> Unit, onToken: (String) -> Un
                             preview,
                             analysis,
                         )
-                    }, ContextCompat.getMainExecutor(ctx))
+                    }, mainExecutor)
                     previewView
                 },
-                modifier = M.fillMaxWidth().height(280.dp),
+                modifier = M.fillMaxWidth().height(320.dp),
             )
-            Spacer(M.height(8.dp))
-            OutlinedTextField(
-                value = manual,
-                onValueChange = { manual = it },
-                label = { Text("veya token yapıştır") },
-                modifier = M.fillMaxWidth(),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onCancel) { Text("Vazgeç") }
-                Button(
-                    onClick = { if (manual.isNotBlank()) onToken(ApiClient.extractQrToken(manual)) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Blue),
-                ) { Text("Gönder") }
+            Spacer(M.height(12.dp))
+            OutlinedButton(onClick = onCancel, modifier = M.fillMaxWidth()) {
+                Text("Vazgeç")
             }
         }
     }
 }
 
 @SuppressLint("MissingPermission")
-suspend fun currentLocation(context: Context): Location =
+suspend fun currentLocation(context: Context): Location = withContext(Dispatchers.Main) {
+    val client = LocationServices.getFusedLocationProviderClient(context)
+    try {
+        val cts = CancellationTokenSource()
+        val fresh = client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cts.token).await()
+        if (fresh != null) return@withContext fresh
+    } catch (_: Exception) {
+        // fallback below
+    }
     suspendCancellableCoroutine { cont ->
-        val client = LocationServices.getFusedLocationProviderClient(context)
         client.lastLocation
             .addOnSuccessListener { loc ->
                 if (loc != null) cont.resume(loc)
-                else cont.resumeWithException(IllegalStateException("Konum alinamadi. GPS acik olsun."))
+                else cont.resumeWithException(
+                    IllegalStateException("Konum alınamadı. GPS’i açıp açık alanda tekrar deneyin.")
+                )
             }
-            .addOnFailureListener { cont.resumeWithException(it) }
+            .addOnFailureListener {
+                cont.resumeWithException(
+                    IllegalStateException("Konum alınamadı. Konum izni ve GPS açık olsun.")
+                )
+            }
     }
+}

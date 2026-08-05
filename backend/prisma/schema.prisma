@@ -24,7 +24,7 @@ model CompanySettings {
   id                    Int     @id @default(1)
   companyName           String  @default("KobiPerTa")
   workStart             String  @default("08:00")
-  workEnd               String  @default("17:00")
+  workEnd               String  @default("18:00")
   breakMinutes          Int     @default(60)
   deductBreak           Boolean @default(true)
   latitude              Float   @default(41.0082)

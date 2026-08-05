@@ -8,10 +8,12 @@ dist/
 .idea/
 .vscode/
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/app/build/
 android/build/
 *.apk
+!KobiPerTa-debug.apk
 *.iml
 .DS_Store
 backend/.agents/

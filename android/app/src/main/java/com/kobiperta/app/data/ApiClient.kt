@@ -106,22 +106,27 @@ class ApiClient(private val session: SessionStore) {
         }
     }
 
-    suspend fun punch(type: String, latitude: Double, longitude: Double, qrToken: String) =
-        withContext(Dispatchers.IO) {
-            val body = JSONObject()
-                .put("type", type)
-                .put("latitude", latitude)
-                .put("longitude", longitude)
-                .put("qrToken", qrToken)
-                .toString()
-                .toRequestBody(json)
-            val req = authed(Request.Builder().url(url("/api/attendance/punch"))).post(body).build()
-            client.newCall(req).execute().use { res ->
-                val text = res.body?.string().orEmpty()
-                val obj = if (text.isBlank()) JSONObject() else JSONObject(text)
-                if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "İşlem başarısız"))
-            }
+    suspend fun punch(
+        type: String,
+        latitude: Double,
+        longitude: Double,
+        mode: String = "gps",
+        qrToken: String? = null,
+    ) = withContext(Dispatchers.IO) {
+        val bodyJson = JSONObject()
+            .put("type", type)
+            .put("latitude", latitude)
+            .put("longitude", longitude)
+            .put("mode", mode)
+        if (!qrToken.isNullOrBlank()) bodyJson.put("qrToken", qrToken)
+        val body = bodyJson.toString().toRequestBody(json)
+        val req = authed(Request.Builder().url(url("/api/attendance/punch"))).post(body).build()
+        client.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            val obj = if (text.isBlank()) JSONObject() else JSONObject(text)
+            if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "İşlem başarısız"))
         }
+    }
 
     companion object {
         fun extractQrToken(raw: String): String {

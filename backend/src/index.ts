@@ -8,11 +8,11 @@ import { prisma } from "./prisma";
 import { requireAuth, requireAdmin, signToken } from "./auth";
 import { seed } from "./seed";
 import { getTurkeyPublicHolidays } from "./holidays";
+import { buildMonthlyExcelBuffer, buildMonthlyRows } from "./reportExcel";
 import {
   buildQrToken,
-  computeDayMinutes,
   currentMinutesOfDay,
-  dayPairs,
+  daySessions,
   formatDuration,
   haversineMeters,
   parseHmToMinutes,
@@ -210,14 +210,19 @@ app.post("/api/attendance/punch", requireAuth, async (req, res) => {
       type: z.enum(["CHECK_IN", "CHECK_OUT"]),
       latitude: z.number(),
       longitude: z.number(),
-      qrToken: z.string().min(8),
+      mode: z.enum(["gps", "qr"]).optional(),
+      qrToken: z.string().min(8).optional(),
     })
     .safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "Eksik veya hatalı veri" });
 
   const settings = await getSettings();
-  if (!verifyQrToken(settings.qrSecret, body.data.qrToken)) {
-    return res.status(400).json({ error: "QR kod geçersiz veya süresi dolmuş" });
+  const mode = body.data.mode ?? (body.data.qrToken ? "qr" : "gps");
+
+  if (mode === "qr") {
+    if (!body.data.qrToken || !verifyQrToken(settings.qrSecret, body.data.qrToken)) {
+      return res.status(400).json({ error: "QR kod geçersiz veya süresi dolmuş" });
+    }
   }
 
   const distance = haversineMeters(
@@ -238,17 +243,33 @@ app.post("/api/attendance/punch", requireAuth, async (req, res) => {
 
   const existing = await prisma.attendanceRecord.findMany({
     where: { userId: req.user!.id, workDate },
+    orderBy: { timestamp: "asc" },
   });
-  const { checkIn, checkOut } = dayPairs(existing);
+  const session = daySessions(existing);
+
+  // QR: en az 5 dk ara (çift okutma koruması)
+  if (mode === "qr" && session.lastRecord) {
+    const gapMs = Date.now() - session.lastRecord.timestamp.getTime();
+    const minGapMs = 5 * 60_000;
+    if (gapMs < minGapMs) {
+      const waitSec = Math.ceil((minGapMs - gapMs) / 1000);
+      return res.status(400).json({
+        error: `QR ile peş peşe işlem için en az 5 dakika bekleyin. Kalan: ${waitSec} sn`,
+      });
+    }
+  }
 
   if (body.data.type === "CHECK_IN") {
-    if (checkIn) return res.status(400).json({ error: "Bugün zaten giriş yapılmış. Günlük tek giriş/çıkış geçerlidir." });
+    if (session.isOpen) {
+      return res.status(400).json({ error: "Zaten açık bir giriş var. Önce çıkış yapın." });
+    }
     if (nowMin > workEndMin) {
       return res.status(400).json({ error: "Mesai bitişinden sonra giriş yapılamaz. Yarın tekrar deneyin." });
     }
   } else {
-    if (!checkIn) return res.status(400).json({ error: "Önce giriş yapmalısınız" });
-    if (checkOut) return res.status(400).json({ error: "Bugün zaten çıkış yapılmış" });
+    if (!session.isOpen) {
+      return res.status(400).json({ error: "Önce giriş yapmalısınız" });
+    }
   }
 
   const record = await prisma.attendanceRecord.create({
@@ -259,6 +280,7 @@ app.post("/api/attendance/punch", requireAuth, async (req, res) => {
       timestamp: new Date(),
       latitude: body.data.latitude,
       longitude: body.data.longitude,
+      note: mode === "qr" ? "QR + GPS" : "GPS",
     },
   });
 
@@ -277,17 +299,26 @@ app.get("/api/attendance/today", requireAuth, async (_req, res) => {
   const records = await prisma.attendanceRecord.findMany({ where: { workDate } });
 
   const rows = users.map((u) => {
-    const { checkIn, checkOut } = dayPairs(records.filter((r) => r.userId === u.id));
+    const session = daySessions(records.filter((r) => r.userId === u.id));
     return {
       user: u,
       workDate,
-      checkIn: checkIn
-        ? { id: checkIn.id, at: checkIn.timestamp, hm: toLocalHm(checkIn.timestamp, settings.timezoneOffsetMinutes) }
+      checkIn: session.checkIn
+        ? {
+            id: session.checkIn.id,
+            at: session.checkIn.timestamp,
+            hm: toLocalHm(session.checkIn.timestamp, settings.timezoneOffsetMinutes),
+          }
         : null,
-      checkOut: checkOut
-        ? { id: checkOut.id, at: checkOut.timestamp, hm: toLocalHm(checkOut.timestamp, settings.timezoneOffsetMinutes) }
+      checkOut: session.checkOut
+        ? {
+            id: session.checkOut.id,
+            at: session.checkOut.timestamp,
+            hm: toLocalHm(session.checkOut.timestamp, settings.timezoneOffsetMinutes),
+          }
         : null,
-      status: !checkIn ? "YOK" : !checkOut ? "İŞTE" : "ÇIKIŞ",
+      pairCount: session.pairs.length,
+      status: !session.firstCheckIn ? "YOK" : session.isOpen ? "İŞTE" : "ÇIKIŞ",
     };
   });
 
@@ -352,15 +383,12 @@ app.post("/api/attendance/manual", requireAuth, requireAdmin, async (req, res) =
   const existing = await prisma.attendanceRecord.findMany({
     where: { userId: body.data.userId, workDate: body.data.workDate },
   });
-  const { checkIn, checkOut } = dayPairs(existing);
-  if (body.data.type === "CHECK_IN" && checkIn) {
-    return res.status(400).json({ error: "Bu gün için giriş zaten var" });
+  const session = daySessions(existing);
+  if (body.data.type === "CHECK_IN" && session.isOpen) {
+    return res.status(400).json({ error: "Açık giriş varken yeni giriş eklenemez; önce çıkış ekleyin" });
   }
-  if (body.data.type === "CHECK_OUT") {
-    if (!checkIn && body.data.type === "CHECK_OUT") {
-      // allow admin to add checkout only if check-in exists — or create both separately
-    }
-    if (checkOut) return res.status(400).json({ error: "Bu gün için çıkış zaten var" });
+  if (body.data.type === "CHECK_OUT" && !session.isOpen) {
+    return res.status(400).json({ error: "Çıkış için önce giriş kaydı olmalı" });
   }
 
   const record = await prisma.attendanceRecord.create({
@@ -478,45 +506,25 @@ app.get("/api/reports/monthly", requireAuth, async (req, res) => {
   });
   const holidays = await prisma.holiday.findMany({ where: { date: { startsWith: yearMonth } } });
   const leaves = await prisma.leave.findMany({ where: { date: { startsWith: yearMonth } } });
+  const leaveMap = new Map<string, number>();
+  for (const l of leaves) {
+    leaveMap.set(l.userId, (leaveMap.get(l.userId) ?? 0) + 1);
+  }
 
-  const report = users.map((u) => {
-    const userRecords = records.filter((r) => r.userId === u.id);
-    const dates = [...new Set(userRecords.map((r) => r.workDate))].sort();
-    let totalWorked = 0;
-    let totalOvertime = 0;
-    let incompleteDays = 0;
-    const days = dates.map((date) => {
-      const { checkIn, checkOut } = dayPairs(userRecords.filter((r) => r.workDate === date));
-      const calc = computeDayMinutes(
-        checkIn?.timestamp ?? null,
-        checkOut?.timestamp ?? null,
-        settings
-      );
-      totalWorked += calc.worked;
-      totalOvertime += calc.overtime;
-      if (calc.incomplete) incompleteDays += 1;
-      return {
-        date,
-        checkIn: checkIn ? toLocalHm(checkIn.timestamp, settings.timezoneOffsetMinutes) : null,
-        checkOut: checkOut ? toLocalHm(checkOut.timestamp, settings.timezoneOffsetMinutes) : null,
-        workedMinutes: calc.worked,
-        overtimeMinutes: calc.overtime,
-        incomplete: calc.incomplete,
-        workedLabel: formatDuration(calc.worked),
-      };
-    });
-
-    return {
-      user: { id: u.id, fullName: u.fullName, email: u.email },
-      totalWorkedMinutes: totalWorked,
-      totalOvertimeMinutes: totalOvertime,
-      totalWorkedLabel: formatDuration(totalWorked),
-      totalOvertimeLabel: formatDuration(totalOvertime),
-      incompleteDays,
-      leaveDays: leaves.filter((l) => l.userId === u.id).length,
-      days,
-    };
-  });
+  const holidayDates = new Set(holidays.map((h) => h.date));
+  const report = buildMonthlyRows(users, records, settings, leaveMap, holidayDates).map(
+    (r) => ({
+      ...r,
+      totalWorkedLabel: formatDuration(r.totalWorkedMinutes),
+      totalOvertimeLabel: formatDuration(r.totalOvertimeMinutes),
+      days: r.days.map((d) => ({
+        ...d,
+        workedLabel:
+          d.incomplete || d.workedMinutes == null ? "" : formatDuration(d.workedMinutes),
+        overtimeMinutes: d.overtimeMinutes ?? 0,
+      })),
+    })
+  );
 
   res.json({
     month: yearMonth,
@@ -526,9 +534,49 @@ app.get("/api/reports/monthly", requireAuth, async (req, res) => {
       workStart: settings.workStart,
       workEnd: settings.workEnd,
     },
+    note:
+      "Eksik çıkış Excel/ücret hesabında mesai bitişi (varsayılan 18:00) kabul edilir. Hafta içi 08:00–18:00 normal; dışı ve HS/tatil x1.5. Geç/erken x1.5 düşülür.",
     holidays,
     report,
   });
+});
+
+app.get("/api/reports/monthly/excel", requireAuth, requireAdmin, async (req, res) => {
+  const settings = await getSettings();
+  const yearMonth =
+    typeof req.query.month === "string" && /^\d{4}-\d{2}$/.test(req.query.month)
+      ? req.query.month
+      : todayWorkDate(settings.timezoneOffsetMinutes).slice(0, 7);
+
+  const users = await prisma.user.findMany({
+    where: { active: true, role: "EMPLOYEE" },
+    orderBy: { fullName: "asc" },
+  });
+  const records = await prisma.attendanceRecord.findMany({
+    where: { workDate: { startsWith: yearMonth } },
+  });
+  const holidays = await prisma.holiday.findMany({
+    where: { date: { startsWith: yearMonth } },
+  });
+  const holidayDates = new Set(holidays.map((h) => h.date));
+  const leaves = await prisma.leave.findMany({ where: { date: { startsWith: yearMonth } } });
+  const leaveMap = new Map<string, number>();
+  for (const l of leaves) {
+    leaveMap.set(l.userId, (leaveMap.get(l.userId) ?? 0) + 1);
+  }
+
+  const report = buildMonthlyRows(users, records, settings, leaveMap, holidayDates);
+  const buffer = await buildMonthlyExcelBuffer(yearMonth, settings, report);
+
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="KobiPerTa-mesai-${yearMonth}.xlsx"`
+  );
+  res.send(buffer);
 });
 
 const port = Number(process.env.PORT || 4000);

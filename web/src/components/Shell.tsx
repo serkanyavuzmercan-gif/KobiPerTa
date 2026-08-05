@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { clearSession, getStoredUser } from "@/lib/api";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 const links = [
   { href: "/dashboard", label: "Bugün" },
@@ -17,15 +17,12 @@ const links = [
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [name, setName] = useState("");
 
   useEffect(() => {
     const u = getStoredUser();
     if (!u || u.role !== "ADMIN") {
       router.replace("/");
-      return;
     }
-    setName(u.fullName);
   }, [router]);
 
   return (
@@ -33,9 +30,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <div className="mx-auto flex min-h-screen max-w-7xl gap-6 px-4 py-6 md:px-8">
         <aside className="hidden w-60 shrink-0 flex-col rounded-3xl bg-slate-900 p-5 text-white md:flex">
           <div className="mb-8">
-            <p className="text-xs uppercase tracking-[0.2em] text-sky-300">KobiPerTa</p>
-            <h1 className="mt-2 text-2xl font-semibold">Yönetim</h1>
-            <p className="mt-1 text-sm text-slate-300">{name}</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-sky-300">
+              KOBİPERTA - YÖNETİCİ
+            </p>
+            <h1 className="mt-2 text-2xl font-semibold">Personel</h1>
+            <p className="mt-1 text-sm font-semibold text-slate-200">
+              Giriş-Çıkış ve Mesai Hesaplama
+            </p>
           </div>
           <nav className="flex flex-1 flex-col gap-1">
             {links.map((l) => {
