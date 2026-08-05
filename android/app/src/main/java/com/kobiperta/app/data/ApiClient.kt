@@ -5,8 +5,12 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 data class TodayRow(
@@ -31,6 +35,48 @@ class ApiClient(private val session: SessionStore) {
         return builder
     }
 
+    /**
+     * Runs a request and turns transport failures into messages a user can act on,
+     * instead of raw socket errors.
+     */
+    private fun <T> call(request: Request, fallbackError: String, read: (Response, JSONObject) -> T): T {
+        val response = try {
+            client.newCall(request).execute()
+        } catch (_: UnknownHostException) {
+            throw IllegalStateException(
+                "Sunucuya ulaşılamadı. Sunucu adresi hatalı olabilir (${session.apiBaseUrl})."
+            )
+        } catch (_: ConnectException) {
+            throw IllegalStateException(
+                "Sunucuya bağlanılamadı. Sunucunun açık olduğundan ve aynı Wi-Fi ağında olduğunuzdan emin olun."
+            )
+        } catch (_: SocketTimeoutException) {
+            throw IllegalStateException("Sunucu yanıt vermedi (zaman aşımı). İnternet bağlantınızı kontrol edin.")
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Bağlantı hatası: ${e.message ?: "internet bağlantınızı kontrol edin"}"
+            )
+        }
+
+        return response.use { res ->
+            val text = res.body?.string().orEmpty()
+            val obj = try {
+                JSONObject(if (text.isBlank()) "{}" else text)
+            } catch (_: Exception) {
+                JSONObject()
+            }
+            if (!res.isSuccessful && res.code >= 500) {
+                throw IllegalStateException(
+                    obj.optString("error").ifBlank { "Sunucu hatası (${res.code}). Lütfen yöneticinize bildirin." }
+                )
+            }
+            if (!res.isSuccessful && obj.optString("error").isBlank()) {
+                throw IllegalStateException("$fallbackError (kod ${res.code})")
+            }
+            read(res, obj)
+        }
+    }
+
     suspend fun login(email: String, password: String): AuthUser = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("email", email)
@@ -38,9 +84,7 @@ class ApiClient(private val session: SessionStore) {
             .toString()
             .toRequestBody(json)
         val req = Request.Builder().url(url("/api/auth/login")).post(body).build()
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+        call(req, "Giriş başarısız") { res, obj ->
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Giriş başarısız"))
             val token = obj.getString("token")
             val u = obj.getJSONObject("user")
@@ -57,9 +101,7 @@ class ApiClient(private val session: SessionStore) {
 
     suspend fun me(): AuthUser = withContext(Dispatchers.IO) {
         val req = authed(Request.Builder().url(url("/api/me"))).get().build()
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+        call(req, "Oturum doğrulanamadı") { res, obj ->
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Oturum geçersiz"))
             AuthUser(
                 id = obj.getString("id"),
@@ -73,9 +115,7 @@ class ApiClient(private val session: SessionStore) {
     suspend fun forgotPassword(email: String): Pair<String, String> = withContext(Dispatchers.IO) {
         val body = JSONObject().put("email", email).toString().toRequestBody(json)
         val req = Request.Builder().url(url("/api/auth/forgot-password")).post(body).build()
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+        call(req, "İstek başarısız") { res, obj ->
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "İstek başarısız"))
             obj.optString("message") to obj.optString("supportEmail")
         }
@@ -83,9 +123,7 @@ class ApiClient(private val session: SessionStore) {
 
     suspend fun today(): Pair<String, List<TodayRow>> = withContext(Dispatchers.IO) {
         val req = authed(Request.Builder().url(url("/api/attendance/today"))).get().build()
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+        call(req, "Liste alınamadı") { res, obj ->
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Liste alınamadı"))
             val rows = obj.getJSONArray("rows")
             val list = buildList {
@@ -121,9 +159,7 @@ class ApiClient(private val session: SessionStore) {
         if (!qrToken.isNullOrBlank()) bodyJson.put("qrToken", qrToken)
         val body = bodyJson.toString().toRequestBody(json)
         val req = authed(Request.Builder().url(url("/api/attendance/punch"))).post(body).build()
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            val obj = if (text.isBlank()) JSONObject() else JSONObject(text)
+        call(req, "İşlem kaydedilemedi") { res, obj ->
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "İşlem başarısız"))
         }
     }

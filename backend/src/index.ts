@@ -28,6 +28,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/** Minimum time between two punches, so a check-out cannot follow a check-in instantly. */
+const MIN_PUNCH_GAP_MS = 5 * 60_000;
+
 async function getSettings() {
   const s = await prisma.companySettings.findUnique({ where: { id: 1 } });
   if (!s) throw new Error("Ayarlar bulunamadı");
@@ -132,6 +135,22 @@ app.patch("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
     .safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "Geçersiz veri" });
 
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: "Personel bulunamadı" });
+
+  // The system must always keep at least one usable admin account.
+  const losesAdmin =
+    target.role === "ADMIN" &&
+    (body.data.role === "EMPLOYEE" || body.data.active === false);
+  if (losesAdmin) {
+    const activeAdmins = await prisma.user.count({
+      where: { role: "ADMIN", active: true },
+    });
+    if (activeAdmins <= 1) {
+      return res.status(400).json({ error: "Sistemde en az bir aktif yönetici kalmalı" });
+    }
+  }
+
   const data: Record<string, unknown> = { ...body.data };
   if (body.data.password) {
     data.passwordHash = await bcrypt.hash(body.data.password, 10);
@@ -144,6 +163,37 @@ app.patch("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
     select: { id: true, email: true, fullName: true, role: true, active: true },
   });
   res.json(user);
+});
+
+app.delete("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
+  const id = req.params.id;
+  if (id === req.user!.id) {
+    return res.status(400).json({ error: "Kendi hesabınızı silemezsiniz" });
+  }
+
+  const target = await prisma.user.findUnique({ where: { id } });
+  if (!target) return res.status(404).json({ error: "Personel bulunamadı" });
+
+  if (target.role === "ADMIN") {
+    const adminCount = await prisma.user.count({ where: { role: "ADMIN" } });
+    if (adminCount <= 1) {
+      return res.status(400).json({ error: "Son yönetici hesabı silinemez" });
+    }
+  }
+
+  // Attendance and leave rows have no cascade rule, so clear them first.
+  const [attendance, leaves] = await prisma.$transaction([
+    prisma.attendanceRecord.deleteMany({ where: { userId: id } }),
+    prisma.leave.deleteMany({ where: { userId: id } }),
+  ]);
+  await prisma.user.delete({ where: { id } });
+
+  res.json({
+    deleted: true,
+    fullName: target.fullName,
+    removedAttendance: attendance.count,
+    removedLeaves: leaves.count,
+  });
 });
 
 // --- Settings ---
@@ -247,14 +297,16 @@ app.post("/api/attendance/punch", requireAuth, async (req, res) => {
   });
   const session = daySessions(existing);
 
-  // QR: en az 5 dk ara (çift okutma koruması)
-  if (mode === "qr" && session.lastRecord) {
+  // Peş peşe işlem koruması: giriş hemen ardından çıkış basılamaz
+  if (session.lastRecord) {
     const gapMs = Date.now() - session.lastRecord.timestamp.getTime();
-    const minGapMs = 5 * 60_000;
-    if (gapMs < minGapMs) {
-      const waitSec = Math.ceil((minGapMs - gapMs) / 1000);
+    if (gapMs < MIN_PUNCH_GAP_MS) {
+      const waitSec = Math.ceil((MIN_PUNCH_GAP_MS - gapMs) / 1000);
+      const waitMin = Math.ceil(waitSec / 60);
       return res.status(400).json({
-        error: `QR ile peş peşe işlem için en az 5 dakika bekleyin. Kalan: ${waitSec} sn`,
+        error: `Peş peşe işlem için en az ${MIN_PUNCH_GAP_MS / 60_000} dakika bekleyin. Kalan: ${
+          waitSec >= 60 ? `${waitMin} dk` : `${waitSec} sn`
+        }`,
       });
     }
   }
@@ -291,8 +343,9 @@ app.post("/api/attendance/punch", requireAuth, async (req, res) => {
 app.get("/api/attendance/today", requireAuth, async (_req, res) => {
   const settings = await getSettings();
   const workDate = todayWorkDate(settings.timezoneOffsetMinutes);
+  // Admins are part of the workforce too, so they appear in attendance as well.
   const users = await prisma.user.findMany({
-    where: { active: true, role: "EMPLOYEE" },
+    where: { active: true },
     orderBy: { fullName: "asc" },
     select: { id: true, fullName: true, email: true },
   });
@@ -498,7 +551,7 @@ app.get("/api/reports/monthly", requireAuth, async (req, res) => {
       : todayWorkDate(settings.timezoneOffsetMinutes).slice(0, 7);
 
   const users = await prisma.user.findMany({
-    where: { active: true, role: "EMPLOYEE" },
+    where: { active: true },
     orderBy: { fullName: "asc" },
   });
   const records = await prisma.attendanceRecord.findMany({
@@ -549,7 +602,7 @@ app.get("/api/reports/monthly/excel", requireAuth, requireAdmin, async (req, res
       : todayWorkDate(settings.timezoneOffsetMinutes).slice(0, 7);
 
   const users = await prisma.user.findMany({
-    where: { active: true, role: "EMPLOYEE" },
+    where: { active: true },
     orderBy: { fullName: "asc" },
   });
   const records = await prisma.attendanceRecord.findMany({

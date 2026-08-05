@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +62,7 @@ import com.kobiperta.app.data.AuthUser
 import com.kobiperta.app.data.SessionStore
 import com.kobiperta.app.data.TodayRow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
@@ -70,6 +74,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 private val Blue = Color(0xFF0369A1)
 private val Dark = Color(0xFF0F172A)
 private val Bg = Color(0xFFF1F5F9)
+
+/** Keeps the spinner up long enough that the result does not flash past the user. */
+private const val FEEDBACK_DELAY_MS = 5_000L
+
+/** Matches the server rule that blocks a check-out right after a check-in. */
+private const val PUNCH_COOLDOWN_MS = 5 * 60_000L
 
 @Composable
 fun AppRoot(permissionReady: Boolean) {
@@ -287,9 +297,16 @@ fun HomeScreen(
     var rows by remember { mutableStateOf<List<TodayRow>>(emptyList()) }
     var myStatus by remember { mutableStateOf("-") }
     var message by remember { mutableStateOf<String?>(null) }
+    var messageOk by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
     var pendingType by remember { mutableStateOf("CHECK_IN") }
     var loading by remember { mutableStateOf(false) }
+    var waitSeconds by remember { mutableStateOf(0) }
+    var gpsEnabled by remember { mutableStateOf(locationServicesEnabled(context)) }
+    var cooldownUntil by remember { mutableStateOf(0L) }
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    val cooldownLeftSec = ((cooldownUntil - nowMs) / 1000).toInt().coerceAtLeast(0)
 
     fun refresh() {
         scope.launch {
@@ -311,38 +328,51 @@ fun HomeScreen(
 
     LaunchedEffect(Unit) { refresh() }
 
-    fun punchGps(type: String) {
-        loading = true
-        message = null
-        scope.launch {
-            try {
-                val loc = currentLocation(context)
-                api.punch(type, loc.latitude, loc.longitude, mode = "gps")
-                message = if (type == "CHECK_IN") "Mesaiye başlandı" else "Mesai bitirildi"
-                refresh()
-            } catch (e: Exception) {
-                message = e.message
-            } finally {
-                loading = false
-            }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            gpsEnabled = locationServicesEnabled(context)
+            delay(1000)
         }
     }
 
-    fun punchWithQr(token: String) {
+    fun runPunch(type: String, mode: String, qrToken: String? = null) {
         loading = true
         message = null
-        scanning = false
+        waitSeconds = (FEEDBACK_DELAY_MS / 1000).toInt()
         scope.launch {
-            try {
-                val loc = currentLocation(context)
-                api.punch(pendingType, loc.latitude, loc.longitude, mode = "qr", qrToken = token)
-                message = if (pendingType == "CHECK_IN") "Mesaiye başlandı (QR)" else "Mesai bitirildi (QR)"
-                refresh()
-            } catch (e: Exception) {
-                message = e.message
-            } finally {
-                loading = false
+            val startedAt = System.currentTimeMillis()
+            val ticker = launch {
+                while (waitSeconds > 0) {
+                    delay(1000)
+                    waitSeconds -= 1
+                }
             }
+            val outcome = runCatching {
+                if (!locationServicesEnabled(context)) {
+                    error("Telefonunuzun konum (GPS) servisi kapalı. Ayarlardan konumu açıp tekrar deneyin.")
+                }
+                val loc = currentLocation(context)
+                api.punch(type, loc.latitude, loc.longitude, mode = mode, qrToken = qrToken)
+            }
+            val elapsed = System.currentTimeMillis() - startedAt
+            if (elapsed < FEEDBACK_DELAY_MS) delay(FEEDBACK_DELAY_MS - elapsed)
+            ticker.cancel()
+            waitSeconds = 0
+
+            val suffix = if (mode == "qr") " (QR)" else ""
+            outcome
+                .onSuccess {
+                    messageOk = true
+                    message = if (type == "CHECK_IN") "Giriş yapıldı$suffix" else "Çıkış yapıldı$suffix"
+                    cooldownUntil = System.currentTimeMillis() + PUNCH_COOLDOWN_MS
+                    refresh()
+                }
+                .onFailure {
+                    messageOk = false
+                    message = it.message ?: "İşlem başarısız"
+                }
+            loading = false
         }
     }
 
@@ -358,25 +388,58 @@ fun HomeScreen(
 
         Text(
             myStatus,
-            modifier = M.padding(top = 12.dp, bottom = 20.dp),
+            modifier = M.padding(top = 12.dp, bottom = 12.dp),
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium,
             color = Dark,
         )
 
+        if (!gpsEnabled) {
+            Column(
+                M.fillMaxWidth()
+                    .background(Color(0xFFFEF3C7), RoundedCornerShape(12.dp))
+                    .padding(12.dp),
+            ) {
+                Text("Konum servisi kapalı", fontWeight = FontWeight.Bold, color = Color(0xFF92400E))
+                Text(
+                    "Giriş-çıkış yapabilmek için telefonunuzun GPS/konum servisini açın.",
+                    color = Color(0xFF92400E),
+                    fontSize = 13.sp,
+                )
+                Button(
+                    onClick = {
+                        context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB45309)),
+                    modifier = M.padding(top = 8.dp),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text("Konum ayarlarını aç")
+                }
+            }
+            Spacer(M.height(12.dp))
+        }
+
+        val cooldownText = if (cooldownLeftSec > 0) {
+            "Yeni işlem için ${cooldownLeftSec / 60} dk ${cooldownLeftSec % 60} sn"
+        } else {
+            null
+        }
+        val actionsEnabled = permissionReady && !loading && gpsEnabled && cooldownLeftSec == 0
+
         BigAction(
             title = "Mesaiye başla",
-            subtitle = "Konum ile giriş",
+            subtitle = cooldownText ?: "Konum ile giriş",
             color = Color(0xFF059669),
-            enabled = permissionReady && !loading,
-            onClick = { punchGps("CHECK_IN") },
+            enabled = actionsEnabled,
+            onClick = { runPunch("CHECK_IN", "gps") },
         )
         Spacer(M.height(12.dp))
         BigAction(
             title = "QR okut",
-            subtitle = "Kamera ile otomatik kayıt",
+            subtitle = cooldownText ?: "Kamera ile otomatik kayıt",
             color = Blue,
-            enabled = permissionReady && !loading,
+            enabled = actionsEnabled,
             onClick = {
                 pendingType = if (myStatus == "Mesai devam ediyor") "CHECK_OUT" else "CHECK_IN"
                 scanning = true
@@ -385,20 +448,31 @@ fun HomeScreen(
         Spacer(M.height(12.dp))
         BigAction(
             title = "Mesaiyi bitir",
-            subtitle = "Konum ile çıkış",
+            subtitle = cooldownText ?: "Konum ile çıkış",
             color = Color(0xFFB45309),
-            enabled = permissionReady && !loading,
-            onClick = { punchGps("CHECK_OUT") },
+            enabled = actionsEnabled,
+            onClick = { runPunch("CHECK_OUT", "gps") },
         )
 
         if (loading) {
-            CircularProgressIndicator(modifier = M.padding(top = 16.dp), color = Blue)
+            Row(
+                M.padding(top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(modifier = M.size(22.dp), color = Blue)
+                Text(
+                    if (waitSeconds > 0) "İşleminiz kaydediliyor… $waitSeconds sn" else "İşleminiz kaydediliyor…",
+                    modifier = M.padding(start = 12.dp),
+                    color = Dark,
+                )
+            }
         }
         message?.let {
             Text(
                 it,
                 modifier = M.padding(top = 12.dp),
-                color = if (it.contains("başland") || it.contains("bitir")) Color(0xFF047857) else Color(0xFFB91C1C),
+                fontWeight = FontWeight.SemiBold,
+                color = if (messageOk) Color(0xFF047857) else Color(0xFFB91C1C),
             )
         }
 
@@ -424,7 +498,10 @@ fun HomeScreen(
         QrScannerDialog(
             title = if (pendingType == "CHECK_IN") "QR okut — giriş" else "QR okut — çıkış",
             onCancel = { scanning = false },
-            onToken = { punchWithQr(it) },
+            onToken = { token ->
+                scanning = false
+                runPunch(pendingType, "qr", token)
+            },
         )
     }
 }
@@ -523,6 +600,16 @@ fun QrScannerDialog(title: String, onCancel: () -> Unit, onToken: (String) -> Un
             }
         }
     }
+}
+
+/** True when the device has GPS or network location turned on. */
+fun locationServicesEnabled(context: Context): Boolean {
+    val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        ?: return false
+    val gps = runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+    val network =
+        runCatching { manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+    return gps || network
 }
 
 @SuppressLint("MissingPermission")

@@ -29,11 +29,31 @@ type Report = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
+const MONTH_NAMES = [
+  "Ocak",
+  "Şubat",
+  "Mart",
+  "Nisan",
+  "Mayıs",
+  "Haziran",
+  "Temmuz",
+  "Ağustos",
+  "Eylül",
+  "Ekim",
+  "Kasım",
+  "Aralık",
+];
+
 export default function ReportsPage() {
-  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const today = new Date();
+  const [year, setYear] = useState(today.getFullYear());
+  const [monthIndex, setMonthIndex] = useState(today.getMonth());
   const [data, setData] = useState<Report | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+
+  const month = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+  const years = Array.from({ length: 6 }, (_, i) => today.getFullYear() - 4 + i);
 
   useEffect(() => {
     api<Report>(`/api/reports/monthly?month=${month}`).then(setData);
@@ -74,17 +94,33 @@ export default function ReportsPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="month"
-            className="rounded-xl border border-slate-200 px-3 py-2"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-          />
+          <select
+            className="cursor-pointer rounded-xl border border-slate-200 bg-white px-3 py-2"
+            value={monthIndex}
+            onChange={(e) => setMonthIndex(Number(e.target.value))}
+          >
+            {MONTH_NAMES.map((name, i) => (
+              <option key={name} value={i}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="cursor-pointer rounded-xl border border-slate-200 bg-white px-3 py-2"
+            value={year}
+            onChange={(e) => setYear(Number(e.target.value))}
+          >
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
             disabled={exporting}
             onClick={() => void downloadExcel()}
-            className="rounded-xl bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60"
+            className="cursor-pointer rounded-xl bg-emerald-700 px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
           >
             {exporting ? "Hazırlanıyor..." : "Excel'e aktar"}
           </button>
@@ -109,7 +145,7 @@ export default function ReportsPage() {
         {data?.report.map((r) => (
           <div key={r.user.id} className="rounded-2xl border border-slate-200 bg-white p-4">
             <button
-              className="flex w-full items-center justify-between text-left"
+              className="flex w-full cursor-pointer items-center justify-between text-left"
               onClick={() => setOpen(open === r.user.id ? null : r.user.id)}
             >
               <div>
