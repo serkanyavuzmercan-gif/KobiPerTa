@@ -1,6 +1,5 @@
 package com.kobiperta.app.data
 
-import com.kobiperta.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -8,8 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-
-data class AuthUser(val id: String, val email: String, val fullName: String, val role: String)
+import java.util.concurrent.TimeUnit
 
 data class TodayRow(
     val fullName: String,
@@ -18,12 +16,20 @@ data class TodayRow(
     val status: String,
 )
 
-class ApiClient {
-    private val client = OkHttpClient()
+class ApiClient(private val session: SessionStore) {
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .build()
     private val json = "application/json; charset=utf-8".toMediaType()
-    var token: String? = null
 
-    private fun url(path: String) = BuildConfig.API_BASE_URL + path
+    private fun url(path: String) = session.apiBaseUrl + path
+
+    private fun authed(builder: Request.Builder): Request.Builder {
+        val t = session.token
+        if (!t.isNullOrBlank()) builder.header("Authorization", "Bearer $t")
+        return builder
+    }
 
     suspend fun login(email: String, password: String): AuthUser = withContext(Dispatchers.IO) {
         val body = JSONObject()
@@ -34,36 +40,63 @@ class ApiClient {
         val req = Request.Builder().url(url("/api/auth/login")).post(body).build()
         client.newCall(req).execute().use { res ->
             val text = res.body?.string().orEmpty()
-            val obj = JSONObject(text)
+            val obj = JSONObject(if (text.isBlank()) "{}" else text)
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Giriş başarısız"))
-            token = obj.getString("token")
+            val token = obj.getString("token")
             val u = obj.getJSONObject("user")
-            AuthUser(u.getString("id"), u.getString("email"), u.getString("fullName"), u.getString("role"))
+            val user = AuthUser(
+                id = u.getString("id"),
+                email = u.getString("email"),
+                fullName = u.getString("fullName"),
+                role = u.getString("role"),
+            )
+            session.saveLogin(token, user)
+            user
+        }
+    }
+
+    suspend fun me(): AuthUser = withContext(Dispatchers.IO) {
+        val req = authed(Request.Builder().url(url("/api/me"))).get().build()
+        client.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+            if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Oturum geçersiz"))
+            AuthUser(
+                id = obj.getString("id"),
+                email = obj.getString("email"),
+                fullName = obj.getString("fullName"),
+                role = obj.getString("role"),
+            ).also { session.saveLogin(session.token!!, it) }
+        }
+    }
+
+    suspend fun forgotPassword(email: String): Pair<String, String> = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("email", email).toString().toRequestBody(json)
+        val req = Request.Builder().url(url("/api/auth/forgot-password")).post(body).build()
+        client.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            val obj = JSONObject(if (text.isBlank()) "{}" else text)
+            if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "İstek başarısız"))
+            obj.optString("message") to obj.optString("supportEmail")
         }
     }
 
     suspend fun today(): Pair<String, List<TodayRow>> = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(url("/api/attendance/today"))
-            .header("Authorization", "Bearer ${token.orEmpty()}")
-            .get()
-            .build()
+        val req = authed(Request.Builder().url(url("/api/attendance/today"))).get().build()
         client.newCall(req).execute().use { res ->
             val text = res.body?.string().orEmpty()
-            val obj = JSONObject(text)
+            val obj = JSONObject(if (text.isBlank()) "{}" else text)
             if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "Liste alınamadı"))
             val rows = obj.getJSONArray("rows")
             val list = buildList {
                 for (i in 0 until rows.length()) {
                     val r = rows.getJSONObject(i)
                     val user = r.getJSONObject("user")
-                    val cin = r.optJSONObject("checkIn")?.optString("hm")
-                    val cout = r.optJSONObject("checkOut")?.optString("hm")
                     add(
                         TodayRow(
                             fullName = user.getString("fullName"),
-                            checkIn = cin,
-                            checkOut = cout,
+                            checkIn = r.optJSONObject("checkIn")?.optString("hm"),
+                            checkOut = r.optJSONObject("checkOut")?.optString("hm"),
                             status = r.getString("status"),
                         )
                     )
@@ -73,7 +106,7 @@ class ApiClient {
         }
     }
 
-    suspend fun punch(type: String, latitude: Double, longitude: Double, qrToken: String): Unit =
+    suspend fun punch(type: String, latitude: Double, longitude: Double, qrToken: String) =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
                 .put("type", type)
@@ -82,11 +115,7 @@ class ApiClient {
                 .put("qrToken", qrToken)
                 .toString()
                 .toRequestBody(json)
-            val req = Request.Builder()
-                .url(url("/api/attendance/punch"))
-                .header("Authorization", "Bearer ${token.orEmpty()}")
-                .post(body)
-                .build()
+            val req = authed(Request.Builder().url(url("/api/attendance/punch"))).post(body).build()
             client.newCall(req).execute().use { res ->
                 val text = res.body?.string().orEmpty()
                 val obj = if (text.isBlank()) JSONObject() else JSONObject(text)

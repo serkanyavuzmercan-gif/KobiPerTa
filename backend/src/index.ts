@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "./prisma";
 import { requireAuth, requireAdmin, signToken } from "./auth";
 import { seed } from "./seed";
+import { getTurkeyPublicHolidays } from "./holidays";
 import {
   buildQrToken,
   computeDayMinutes,
@@ -14,9 +15,10 @@ import {
   dayPairs,
   formatDuration,
   haversineMeters,
-  isDateInMonth,
   parseHmToMinutes,
   parseWorkDateTime,
+  qrSecondsRemaining,
+  qrSlot,
   toLocalHm,
   todayWorkDate,
   verifyQrToken,
@@ -49,6 +51,31 @@ app.post("/api/auth/login", async (req, res) => {
 
   const auth = { id: user.id, role: user.role, fullName: user.fullName, email: user.email };
   res.json({ token: signToken(auth), user: auth });
+});
+
+/** Public: şifremi unuttum için yönetici mail adresi */
+app.get("/api/auth/forgot-password", async (_req, res) => {
+  const s = await getSettings();
+  res.json({
+    supportEmail: s.passwordResetEmail,
+    message: "Şifre sıfırlama talebinizi bu adrese iletin.",
+  });
+});
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const body = z.object({ email: z.string().email() }).safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "Geçerli bir e-posta girin" });
+
+  const s = await getSettings();
+  const user = await prisma.user.findUnique({ where: { email: body.data.email } });
+  // Güvenlik: kullanıcı yoksa da aynı mesaj
+  res.json({
+    supportEmail: s.passwordResetEmail,
+    userFound: Boolean(user && user.active),
+    message: user && user.active
+      ? `Şifre talebiniz için ${s.passwordResetEmail} adresine yazın.`
+      : `Şifre talebiniz için ${s.passwordResetEmail} adresine yazın.`,
+  });
 });
 
 app.get("/api/me", requireAuth, async (req, res) => {
@@ -132,6 +159,7 @@ app.get("/api/settings", requireAuth, async (_req, res) => {
     longitude: s.longitude,
     radiusMeters: s.radiusMeters,
     timezoneOffsetMinutes: s.timezoneOffsetMinutes,
+    passwordResetEmail: s.passwordResetEmail,
   });
 });
 
@@ -147,6 +175,7 @@ app.put("/api/settings", requireAuth, requireAdmin, async (req, res) => {
       longitude: z.number().optional(),
       radiusMeters: z.number().int().min(20).max(5000).optional(),
       timezoneOffsetMinutes: z.number().int().optional(),
+      passwordResetEmail: z.string().email().optional(),
     })
     .safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "Geçersiz ayar" });
@@ -157,10 +186,21 @@ app.put("/api/settings", requireAuth, requireAdmin, async (req, res) => {
 
 app.get("/api/qr", requireAuth, requireAdmin, async (_req, res) => {
   const s = await getSettings();
-  const token = buildQrToken(s.qrSecret);
-  const payload = JSON.stringify({ app: "KobiPerTa", token });
+  const now = Date.now();
+  const token = buildQrToken(s.qrSecret, now);
+  const slot = qrSlot(now);
+  const secondsRemaining = qrSecondsRemaining(now);
+  const payload = JSON.stringify({ app: "KobiPerTa", token, slot });
   const dataUrl = await QRCode.toDataURL(payload, { width: 360, margin: 2 });
-  res.json({ token, payload, dataUrl, expiresInSeconds: 60 });
+  res.json({
+    token,
+    slot,
+    payload,
+    dataUrl,
+    expiresInSeconds: 60,
+    secondsRemaining,
+    expiresAt: new Date((slot + 1) * 60_000).toISOString(),
+  });
 });
 
 // --- Attendance ---
@@ -346,6 +386,44 @@ app.post("/api/holidays", requireAuth, requireAdmin, async (req, res) => {
   if (!body.success) return res.status(400).json({ error: "Geçersiz tatil" });
   const h = await prisma.holiday.create({ data: body.data });
   res.status(201).json(h);
+});
+
+/** Import Turkey public holidays for a year via date-holidays (upsert by date). */
+app.post("/api/holidays/sync", requireAuth, requireAdmin, async (req, res) => {
+  const yearRaw = req.body?.year ?? req.query.year;
+  const year = Number(yearRaw ?? new Date().getFullYear());
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    return res.status(400).json({ error: "Geçersiz yıl" });
+  }
+
+  const days = getTurkeyPublicHolidays(year);
+  let created = 0;
+  let updated = 0;
+  for (const day of days) {
+    const existing = await prisma.holiday.findUnique({ where: { date: day.date } });
+    if (!existing) {
+      await prisma.holiday.create({ data: day });
+      created += 1;
+    } else if (existing.name !== day.name) {
+      await prisma.holiday.update({ where: { date: day.date }, data: { name: day.name } });
+      updated += 1;
+    }
+  }
+
+  const holidays = await prisma.holiday.findMany({
+    where: { date: { startsWith: String(year) } },
+    orderBy: { date: "asc" },
+  });
+
+  res.json({
+    year,
+    source: "date-holidays",
+    country: "TR",
+    fetched: days.length,
+    created,
+    updated,
+    holidays,
+  });
 });
 
 app.delete("/api/holidays/:id", requireAuth, requireAdmin, async (req, res) => {

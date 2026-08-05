@@ -32,6 +32,7 @@ model CompanySettings {
   radiusMeters          Int     @default(150)
   qrSecret              String  @default("kobiperta-qr-secret")
   timezoneOffsetMinutes Int     @default(180)
+  passwordResetEmail    String  @default("admin@kobiperta.local")
 }
 
 model AttendanceRecord {

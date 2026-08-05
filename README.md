@@ -15,7 +15,7 @@ KOBİ personel giriş-çıkış takip sistemi.
 5. Tüm şirket personeli birbirinin giriş/çıkışını görebilir
 6. Yönetici: kullanıcı ekler, mesai aralığı/mola düşümü belirler, eksik çıkış ve saat düzeltir
 7. Aylık çalışma saati + fazla mesai hesaplanır; mola düşümü yönetici tercihine bağlıdır
-8. Resmi tatil ve izinler eklenebilir
+8. Resmi tatil ve izinler eklenebilir; Türkiye resmi tatilleri `date-holidays` ile yıla göre otomatik yüklenebilir
 
 ## Klasörler
 

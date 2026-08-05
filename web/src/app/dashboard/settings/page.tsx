@@ -14,6 +14,7 @@ type Settings = {
   longitude: number;
   radiusMeters: number;
   timezoneOffsetMinutes: number;
+  passwordResetEmail: string;
 };
 
 export default function SettingsPage() {
@@ -115,6 +116,19 @@ export default function SettingsPage() {
             value={form.radiusMeters}
             onChange={(e) => setForm({ ...form, radiusMeters: Number(e.target.value) })}
           />
+        </label>
+        <label className="text-sm md:col-span-2">
+          Şifremi unuttum mail adresi
+          <input
+            type="email"
+            className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2"
+            value={form.passwordResetEmail || ""}
+            onChange={(e) => setForm({ ...form, passwordResetEmail: e.target.value })}
+            placeholder="ornek@sirket.com"
+          />
+          <span className="mt-1 block text-xs text-slate-500">
+            Personel uygulamada “Şifremi unuttum” dediğinde bu adrese yönlendirilir.
+          </span>
         </label>
         <div className="md:col-span-2">
           <button className="rounded-xl bg-slate-900 px-4 py-2 text-white">Kaydet</button>

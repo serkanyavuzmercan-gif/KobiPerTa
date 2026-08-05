@@ -17,7 +17,13 @@ export async function seed() {
         radiusMeters: 150,
         qrSecret: "kobiperta-qr-secret",
         timezoneOffsetMinutes: 180,
+        passwordResetEmail: "admin@kobiperta.local",
       },
+    });
+  } else if (!(settings as { passwordResetEmail?: string }).passwordResetEmail) {
+    await prisma.companySettings.update({
+      where: { id: 1 },
+      data: { passwordResetEmail: "admin@kobiperta.local" },
     });
   }
 

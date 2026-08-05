@@ -11,6 +11,7 @@ android/.gradle/
 android/local.properties
 android/app/build/
 android/build/
+*.apk
 *.iml
 .DS_Store
 backend/.agents/

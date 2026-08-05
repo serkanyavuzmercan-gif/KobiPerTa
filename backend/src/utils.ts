@@ -33,15 +33,24 @@ export function haversineMeters(
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+const QR_SLOT_MS = 60_000;
+
 /** QR payload rotates every 60 seconds */
+export function qrSlot(at = Date.now()): number {
+  return Math.floor(at / QR_SLOT_MS);
+}
+
 export function buildQrToken(secret: string, at = Date.now()): string {
-  const slot = Math.floor(at / 60_000);
-  return createHmac("sha256", secret).update(String(slot)).digest("hex").slice(0, 24);
+  return createHmac("sha256", secret).update(String(qrSlot(at))).digest("hex").slice(0, 24);
+}
+
+export function qrSecondsRemaining(at = Date.now()): number {
+  return Math.max(1, Math.ceil((QR_SLOT_MS - (at % QR_SLOT_MS)) / 1000));
 }
 
 export function verifyQrToken(secret: string, token: string): boolean {
   const now = Date.now();
-  return [0, -1, 1].some((delta) => buildQrToken(secret, now + delta * 60_000) === token);
+  return [-1, 0, 1].some((delta) => buildQrToken(secret, now + delta * QR_SLOT_MS) === token);
 }
 
 export function dayPairs(records: AttendanceRecord[]) {
